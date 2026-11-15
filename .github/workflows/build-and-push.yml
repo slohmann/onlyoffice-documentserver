@@ -4,22 +4,22 @@ on:
   workflow_dispatch:
     inputs:
       onlyoffice_version:
-        description: 'OnlyOffice build_tools Git Tag (e.g., v10.0.1.11)'
+        description: 'OnlyOffice Release Git Tag matching build_tools & server (e.g., v10.0.0.169)'
         required: true
-        default: 'v10.0.1.11'
+        default: 'v10.0.0.169'
         type: string
   schedule:
     # Optional: Run monthly on the 1st at 02:00 UTC
     - cron: '0 2 1 * *'
 
 env:
-  ONLYOFFICE_VERSION: ${{ github.event.inputs.onlyoffice_version || 'v10.0.1.11' }}
+  ONLYOFFICE_VERSION: ${{ github.event.inputs.onlyoffice_version || 'v10.0.0.169' }}
   DOCKER_IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/onlyoffice-documentserver
   PLATFORM: linux/amd64
 
 jobs:
   build-and-push:
-    name: Build OnlyOffice (${{ github.event.inputs.onlyoffice_version || 'v10.0.1.11' }}) for linux/amd64
+    name: Build OnlyOffice (${{ github.event.inputs.onlyoffice_version || 'v10.0.0.169' }}) for linux/amd64
     runs-on: ubuntu-24.04
     timeout-minutes: 360
 
@@ -200,11 +200,76 @@ jobs:
           with open(build_sln_path, "w", encoding="utf-8") as f:
               f.write(sln_content)
           print("Successfully injected per-project core_build cleanup into build_tools/scripts/build_sln.py")
+
+          # Hook 5: Restrict automate.py Qt and sysroot downloads to amd64 only (skip arm64)
+          # and delete downloaded .7z / .tar.gz archives immediately after extraction (~6 GB saved)
+          automate_path = os.path.join("build_tools", "tools", "linux", "automate.py")
+          if os.path.isfile(automate_path):
+              with open(automate_path, "r", encoding="utf-8") as f:
+                  auto_content = f.read()
+              auto_content = auto_content.replace('["./qt_binary_fetch.py", "all"]', '["./qt_binary_fetch.py", "amd64"]')
+              auto_content = auto_content.replace('["./fetch.py", "all"]', '["./fetch.py", "amd64"]')
+              with open(automate_path, "w", encoding="utf-8") as f:
+                  f.write(auto_content)
+              print("Restricted automate.py qt_binary_fetch and sysroot fetch to amd64 only")
+
+          for fetch_script in [
+              os.path.join("build_tools", "tools", "linux", "qt_binary_fetch.py"),
+              os.path.join("build_tools", "tools", "linux", "sysroot", "fetch.py"),
+          ]:
+              if os.path.isfile(fetch_script):
+                  with open(fetch_script, "r", encoding="utf-8") as f:
+                      fc = f.read()
+                  if 'base.extract(archive_file, "./")' in fc:
+                      fc = fc.replace(
+                          'base.extract(archive_file, "./")',
+                          'base.extract(archive_file, "./")\n  base.delete_file(archive_file)'
+                      )
+                  if 'base.cmd("tar", ["-xzf", "./" + archive])' in fc:
+                      fc = fc.replace(
+                          'base.cmd("tar", ["-xzf", "./" + archive])',
+                          'base.cmd("tar", ["-xzf", "./" + archive])\n  base.delete_file("./" + archive)'
+                      )
+                  with open(fetch_script, "w", encoding="utf-8") as f:
+                      f.write(fc)
+
+          # Hook 6: Use shallow clones (--depth 1) in build_tools/scripts/base.py git_update()
+          # Saves ~8-10 minutes of cloning and ~8-10 GB of .git packfiles!
+          base_py_path = os.path.join("build_tools", "scripts", "base.py")
+          with open(base_py_path, "r", encoding="utf-8") as f:
+              base_content = f.read()
+          old_clone = 'retClone = cmd("git", ["clone", url, folder], is_no_errors)'
+          new_clone = (
+              'branch_tag = config.option("branch").replace("tags/", "")\n'
+              '    retClone = cmd("git", ["clone", "--depth", "1", "--branch", branch_tag, url, folder], True) if branch_tag else 1\n'
+              '    if retClone != 0:\n'
+              '      retClone = cmd("git", ["clone", "--depth", "1", url, folder], is_no_errors)'
+          )
+          if old_clone in base_content:
+              base_content = base_content.replace(old_clone, new_clone, 1)
+              with open(base_py_path, "w", encoding="utf-8") as f:
+                  f.write(base_content)
+              print("Enabled shallow --depth 1 git clones in build_tools/scripts/base.py")
           EOF
 
       - name: Compile Server Components (./automate.py server)
         run: |
           cd build_tools/tools/linux
+          # Derive PRODUCT_VERSION (e.g. 10.0.0) and BUILD_NUMBER (e.g. 169) from ONLYOFFICE_VERSION (v10.0.0.169)
+          # as done in btactic's onlyoffice-package-builder.sh so build_server.py stamps the real version
+          # into Common/sources/commondefines.js instead of 0.0.0.
+          CLEAN_VER="${ONLYOFFICE_VERSION#tags/}"
+          CLEAN_VER="${CLEAN_VER#v}"
+          if [[ "${CLEAN_VER}" =~ ^([0-9]+\.[0-9]+\.[0-9]+)\.([0-9]+)$ ]]; then
+            export PRODUCT_VERSION="${BASH_REMATCH[1]}"
+            export BUILD_NUMBER="${BASH_REMATCH[2]}"
+          else
+            export PRODUCT_VERSION="${CLEAN_VER}"
+            export BUILD_NUMBER="1"
+          fi
+          export NODE_ENV="production"
+          echo "=== Exported PRODUCT_VERSION=${PRODUCT_VERSION}, BUILD_NUMBER=${BUILD_NUMBER}, NODE_ENV=${NODE_ENV} ==="
+
           # If ONLYOFFICE_VERSION is a tag (starts with 'v'), build_tools expects 'tags/<version>'
           # so that scripts/base.py skips running 'git pull' on a detached HEAD.
           if [[ "${ONLYOFFICE_VERSION}" == "master" ]]; then
@@ -215,7 +280,7 @@ jobs:
             BUILD_BRANCH="tags/${ONLYOFFICE_VERSION}"
           fi
           echo "=== Running automate.py with --branch=${BUILD_BRANCH} ==="
-          ./automate.py server --branch="${BUILD_BRANCH}"
+          ./automate.py server --branch="${BUILD_BRANCH}" --update-light="1"
           
           echo "=== Verifying build output in build_tools/out/linux_64/onlyoffice/documentserver ==="
           ls -la "${GITHUB_WORKSPACE}/build_tools/out/linux_64/onlyoffice/documentserver"

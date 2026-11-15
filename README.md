@@ -12,7 +12,12 @@ Automatisierte GitHub-Actions-Pipeline zum Kompilieren und Veröffentlichen eine
 
 ## Welche Versionsnummer (`onlyoffice_version`) wird verwendet?
 
-Maßgeblich ist immer der **Git-Tag aus dem Repository [`ONLYOFFICE/build_tools/tags`](https://github.com/ONLYOFFICE/build_tools/tags)** (aktuell z. B. **`v10.0.1.11`**), da `build_tools` während des Kompiliervorgangs exakt diesen Tag in allen Quellcode-Subrepositories (`core`, `server`, `sdkjs`, `web-apps`) auscheckt.
+Maßgeblich ist ein offizieller **DocumentServer-Release-Tag**, der sowohl in [`ONLYOFFICE/build_tools`](https://github.com/ONLYOFFICE/build_tools/tags) als auch in [`ONLYOFFICE/server`](https://github.com/ONLYOFFICE/server/tags) existiert und mit dem offiziellen `.deb`-Release übereinstimmt (aktuell: **`v10.0.0.169`**, entsprechend Paketversion `10.0.0-169`).
+
+Die aktuellste veröffentlichte Paketversion lässt sich jederzeit mit folgendem Befehl abfragen (Bindestrich `-` durch Punkt `.` ersetzen und `v` voranstellen):
+```bash
+curl -sL "https://download.onlyoffice.com/repo/debian/dists/squeeze/main/binary-amd64/Packages" | grep -A 10 "^Package: onlyoffice-documentserver$" | grep "^Version:" | head -n 1
+```
 
 ---
 
@@ -34,7 +39,7 @@ Damit die GitHub Actions Pipeline das fertige Docker-Image in deinen Docker Hub 
 1. Öffne im GitHub-Repository den Reiter **Actions**.
 2. Wähle links den Workflow **Build and Push Custom OnlyOffice DocumentServer**.
 3. Klicke rechts auf **Run workflow**.
-4. Gib im Feld `OnlyOffice build_tools Git Tag` den gewünschten Release-Tag aus `ONLYOFFICE/build_tools` ein (Standard: `v10.0.1.11`).
+4. Gib im Feld `OnlyOffice Release Git Tag` den gewünschten Release-Tag ein (Standard: `v10.0.0.169`).
 5. Klicke auf **Run workflow**.
 
 > **Hinweis zur Build-Dauer:** Da `build_tools` den gesamten C++-Kern (`core`), die V8-Engine sowie `sdkjs`, `web-apps` und `server` aus dem Quellcode kompiliert, dauert ein Durchlauf auf einem Standard-GitHub-Runner ca. **2,5 bis 4 Stunden**.
