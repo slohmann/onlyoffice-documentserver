@@ -4,11 +4,11 @@
 # ==============================================================================
 # Patches ONLYOFFICE DocumentServer source repositories (server, core, web-apps)
 # prior to compilation by build_tools:
-#   1. Raises concurrent connection limit from 20 to 9999 (compatible with both
-#      v8/v9.0-v9.3 and v9.4+/v10+ where upstream modified connection limits).
-#   2. Unlocks Mobile Web Editing across all mobile editor controllers.
-#   3. Performs strict grep validations so the build aborts immediately if
-#      upstream file structures or variable names change unexpectedly.
+#   1. Raises concurrent connection limit from 20 to 9999 (and raises user limits).
+#   2. Unlocks Mobile Web Editing across all mobile editor controllers
+#      (both modern v9/v10 React patch.jsx and legacy ExtJS Main.js).
+#   3. Performs strict pre- and post-patch grep validations so the build aborts
+#      immediately if upstream file structures or variable names change.
 # ==============================================================================
 
 set -euo pipefail
@@ -62,24 +62,28 @@ fi
 
 echo "[INFO] Inspecting ${CONSTANTS_FILE} for LICENSE_CONNECTIONS..."
 if grep -Eq "exports\.LICENSE_CONNECTIONS[[:space:]]*=" "${CONSTANTS_FILE}"; then
-  # Replace any numeric value on LICENSE_CONNECTIONS (e.g. 20) with 9999
-  sed -i -E 's/(exports\.LICENSE_CONNECTIONS[[:space:]]*=[[:space:]]*)[0-9]+/\19999/g' "${CONSTANTS_FILE}"
+  python3 - "${CONSTANTS_FILE}" << 'PYEOF'
+import re, sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    content = f.read()
+
+content = re.sub(r'(exports\.LICENSE_CONNECTIONS\s*=\s*)\d+', r'\g<1>9999', content)
+content = re.sub(r'(exports\.LICENSE_USERS\s*=\s*)\d+', r'\g<1>9999', content)
+
+with open(path, "w", encoding="utf-8") as f:
+    f.write(content)
+PYEOF
 
   if ! grep -Eq "exports\.LICENSE_CONNECTIONS[[:space:]]*=[[:space:]]*9999" "${CONSTANTS_FILE}"; then
     echo "[FATAL] Post-patch validation failed: 'exports.LICENSE_CONNECTIONS = 9999' not found in ${CONSTANTS_FILE}!" >&2
     exit 1
   fi
-  echo "[SUCCESS] Patched LICENSE_CONNECTIONS = 9999 in ${CONSTANTS_FILE}"
+  echo "[SUCCESS] Patched LICENSE_CONNECTIONS = 9999 and LICENSE_USERS = 9999 in ${CONSTANTS_FILE}"
 else
-  echo "[INFO] 'exports.LICENSE_CONNECTIONS' not present in ${CONSTANTS_FILE} (removed upstream in OnlyOffice >= v9.4 / v10.x)."
-  echo "       Appending explicit exports.LICENSE_CONNECTIONS = 9999 fallback."
-  printf "\nexports.LICENSE_CONNECTIONS = 9999;\n" >> "${CONSTANTS_FILE}"
-fi
-
-# Also patch LICENSE_USERS if present in constants.js
-if grep -Eq "exports\.LICENSE_USERS[[:space:]]*=" "${CONSTANTS_FILE}"; then
-  sed -i -E 's/(exports\.LICENSE_USERS[[:space:]]*=[[:space:]]*)[0-9]+/\19999/g' "${CONSTANTS_FILE}"
-  echo "[SUCCESS] Patched LICENSE_USERS = 9999 in ${CONSTANTS_FILE}"
+  echo "[FATAL] Expected 'exports.LICENSE_CONNECTIONS' not found in ${CONSTANTS_FILE}!" >&2
+  exit 1
 fi
 
 # ------------------------------------------------------------------------------
@@ -88,62 +92,103 @@ fi
 LICENSE_FILE="${SERVER_DIR}/Common/sources/license.js"
 if [[ -f "${LICENSE_FILE}" ]]; then
   echo "[INFO] Checking ${LICENSE_FILE} for hardcoded fallback limits or package type restrictions..."
-  sed -i -E 's/(connections[[:space:]]*:[[:space:]]*)20/\19999/g' "${LICENSE_FILE}" || true
-  sed -i -E 's/(connectionsView[[:space:]]*:[[:space:]]*)20/\19999/g' "${LICENSE_FILE}" || true
-  sed -i -E 's/(light[[:space:]]*:[[:space:]]*)true/\1false/g' "${LICENSE_FILE}" || true
+  python3 - "${LICENSE_FILE}" << 'PYEOF'
+import re, sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    content = f.read()
+
+content = re.sub(r'(connections\s*:\s*)20\b', r'\g<1>9999', content)
+content = re.sub(r'(connectionsView\s*:\s*)20\b', r'\g<1>9999', content)
+content = re.sub(r'(light\s*:\s*)true\b', r'\g<1>false', content)
+
+with open(path, "w", encoding="utf-8") as f:
+    f.write(content)
+PYEOF
 fi
 
 # Check core repository for any C++ connection/license macro constants if defined
-mapfile -t CORE_LIMIT_FILES < <(grep -RIl "LICENSE_CONNECTIONS" "${CORE_DIR}" 2>/dev/null || true)
-if [[ ${#CORE_LIMIT_FILES[@]} -gt 0 ]]; then
-  for cfile in "${CORE_LIMIT_FILES[@]}"; do
-    echo "[INFO] Patching LICENSE_CONNECTIONS reference in core file: ${cfile}"
-    sed -i -E 's/(LICENSE_CONNECTIONS[[:space:]]*=?[[:space:]]*)20/\19999/g' "${cfile}"
-  done
-fi
+while IFS= read -r cfile; do
+  [[ -z "${cfile}" ]] && continue
+  echo "[INFO] Patching LICENSE_CONNECTIONS reference in core file: ${cfile}"
+  python3 - "${cfile}" << 'PYEOF'
+import re, sys
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8", errors="ignore") as f:
+    content = f.read()
+content = re.sub(r'(LICENSE_CONNECTIONS\s*=?\s*)20\b', r'\g<1>9999', content)
+with open(path, "w", encoding="utf-8") as f:
+    f.write(content)
+PYEOF
+done < <(grep -RIl "LICENSE_CONNECTIONS" "${CORE_DIR}" 2>/dev/null || true)
 
 # ------------------------------------------------------------------------------
 # 4. Patch Mobile Editing Restrictions in web-apps
 # ------------------------------------------------------------------------------
-echo "[INFO] Locating Mobile Editor controllers in ${WEBAPPS_DIR}..."
+echo "[INFO] Locating Mobile Editor patch definitions in ${WEBAPPS_DIR}/apps..."
 
-mapfile -t MOBILE_FILES < <(grep -RIl "isSupportEditFeature" "${WEBAPPS_DIR}/apps" 2>/dev/null || true)
-
-if [[ ${#MOBILE_FILES[@]} -eq 0 ]]; then
-  echo "[FATAL] Could not find any files containing 'isSupportEditFeature' in ${WEBAPPS_DIR}/apps!" >&2
-  echo "        Upstream mobile editor implementation may have changed. Aborting build." >&2
-  exit 1
-fi
-
+# Find only files that actually DEFINE isSupportEditFeature (e.g., mobile/src/lib/patch.jsx
+# in OnlyOffice v9/v10, or mobile/app/controller/Main.js in legacy v7/v8),
+# ignoring consumer files like appOptions.js where isSupportEditFeature is just a parameter.
 PATCHED_MOBILE_COUNT=0
 
-for mfile in "${MOBILE_FILES[@]}"; do
+while IFS= read -r mfile; do
+  [[ -z "${mfile}" ]] && continue
   echo "[INFO] Patching mobile editing flag in: ${mfile}"
-  
-  # Handle both unminified source definitions and pre-bundled dist definitions:
-  # Pattern A: multi-line function () {\n return false;\n }
-  # Pattern B: single-line function() { return false; } or return!1
-  # Pattern C: arrow function () => false or ()=>!1
-  sed -i -E \
-    -e '/isSupportEditFeature/{N;N;s/return[[:space:]]+(false|!1)/return true/g;}' \
-    -e 's/(isSupportEditFeature[[:space:]]*[:=][[:space:]]*function[[:space:]]*\([^)]*\)[[:space:]]*\{[[:space:]]*return[[:space:]]*)(false|!1)/\1true/g' \
-    -e 's/(isSupportEditFeature[[:space:]]*[:=][[:space:]]*\([^)]*\)[[:space:]]*=>[[:space:]]*)(false|!1)/\1true/g' \
-    "${mfile}"
 
-  # Verify that no falsy return remains on isSupportEditFeature in this file
-  if grep -Pzo "isSupportEditFeature[\s\S]{0,80}return\s*(false|!1)" "${mfile}" >/dev/null 2>&1; then
-    echo "[FATAL] Failed to patch 'isSupportEditFeature' in ${mfile}!" >&2
+  # Use Python for reliable single-line and multi-line replacement of:
+  #   1. EditorUIController.isSupportEditFeature = () => { return false }
+  #   2. EditorUIController.isSupportEditFeature = () => false;
+  #   3. isSupportEditFeature: function () { return false; }
+  #   4. Minified variants: return!1 or =>!1
+  python3 - "${mfile}" << 'PYEOF'
+import re, sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    content = f.read()
+
+orig = content
+
+# Replace arrow/normal function body returning false / !1 (multi-line or single-line)
+content = re.sub(
+    r'(isSupportEditFeature\s*[:=]\s*(?:function\s*)?\([^)]*\)\s*(?:=>)?\s*\{\s*return\s+)(?:false|!1)(\s*;?\s*\})',
+    r'\g<1>true\g<2>',
+    content,
+    flags=re.MULTILINE
+)
+
+# Replace direct arrow function expression: isSupportEditFeature = () => false
+content = re.sub(
+    r'(isSupportEditFeature\s*[:=]\s*\([^)]*\)\s*=>\s*)(?:false|!1)\b',
+    r'\g<1>true',
+    content,
+    flags=re.MULTILINE
+)
+
+if content == orig and not re.search(r'isSupportEditFeature\s*[:=][\s\S]{0,60}\btrue\b', content):
+    print(f"[FATAL] Pattern replacement did not match in {path}", file=sys.stderr)
+    sys.exit(1)
+
+with open(path, "w", encoding="utf-8") as f:
+    f.write(content)
+PYEOF
+
+  # Validate with grep/python that false is gone and true is present on isSupportEditFeature
+  if grep -Eq "isSupportEditFeature[[:space:]]*[:=].*(false|!1)" "${mfile}"; then
+    echo "[FATAL] Post-patch check failed: 'isSupportEditFeature' still returns false in ${mfile}!" >&2
     exit 1
   fi
 
-  if grep -Pzo "isSupportEditFeature[\s\S]{0,80}(return\s+true|=>\s*true|return\s+1|return!0)" "${mfile}" >/dev/null 2>&1; then
+  if grep -A 3 -E "isSupportEditFeature[[:space:]]*[:=]" "${mfile}" | grep -Eq "true"; then
     PATCHED_MOBILE_COUNT=$((PATCHED_MOBILE_COUNT + 1))
     echo "[SUCCESS] Verified mobile edit feature enabled in: ${mfile}"
   else
-    echo "[FATAL] Validation failed for 'isSupportEditFeature' in ${mfile} after sed replacement!" >&2
+    echo "[FATAL] Validation failed for 'isSupportEditFeature' in ${mfile} after replacement!" >&2
     exit 1
   fi
-done
+done < <(grep -RIlE "isSupportEditFeature[[:space:]]*[:=]" "${WEBAPPS_DIR}/apps" 2>/dev/null || true)
 
 if [[ "${PATCHED_MOBILE_COUNT}" -lt 3 ]]; then
   echo "[FATAL] Expected at least 3 mobile editor apps (document, spreadsheet, presentation) to be patched, but only patched ${PATCHED_MOBILE_COUNT}." >&2
