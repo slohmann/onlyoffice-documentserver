@@ -334,18 +334,48 @@ jobs:
           mv "${GITHUB_WORKSPACE}/build_tools/out/linux_64/onlyoffice/documentserver" \
              "${GITHUB_WORKSPACE}/Docker-DocumentServer/documentserver-compiled"
 
-          # Append overlay steps to official Dockerfile:
-          # The official Dockerfile sets up OS dependencies, Nginx, Supervisor, user 'ds', and base directories.
-          # We then overwrite /var/www/onlyoffice/documentserver/ with our freshly compiled & patched artifacts.
-          cat << 'DOCKERFILE_EOF' >> "${GITHUB_WORKSPACE}/Docker-DocumentServer/Dockerfile"
+          # Strip debug symbols ONLY from pure C++ ELF binaries and shared libraries (not pkg Node.js executables)
+          echo "=== Stripping debug symbols from C++ binaries and shared libraries ==="
+          du -sh "${GITHUB_WORKSPACE}/Docker-DocumentServer/documentserver-compiled"
+          strip --strip-unneeded \
+            "${GITHUB_WORKSPACE}/Docker-DocumentServer/documentserver-compiled/server/FileConverter/bin/x2t" \
+            "${GITHUB_WORKSPACE}/Docker-DocumentServer/documentserver-compiled/server/tools/allfontsgen" \
+            "${GITHUB_WORKSPACE}/Docker-DocumentServer/documentserver-compiled/server/tools/allthemesgen" || true
+          find "${GITHUB_WORKSPACE}/Docker-DocumentServer/documentserver-compiled/server/FileConverter/bin" \
+            -maxdepth 1 -type f -name "*.so*" -exec strip --strip-unneeded {} + || true
+          du -sh "${GITHUB_WORKSPACE}/Docker-DocumentServer/documentserver-compiled"
 
-          # --- Overlay Custom Compiled & Patched OnlyOffice DocumentServer Artifacts ---
-          COPY documentserver-compiled/ /var/www/onlyoffice/documentserver/
-          RUN chown -R ds:ds /var/www/onlyoffice/documentserver && \
-              chmod +x /var/www/onlyoffice/documentserver/server/FileConverter/bin/x2t && \
-              chmod +x /var/www/onlyoffice/documentserver/server/tools/allfontsgen && \
-              chmod +x /var/www/onlyoffice/documentserver/server/tools/allthemesgen
-          DOCKERFILE_EOF
+          # Inject single-layer BuildKit bind-mount overlay directly into the official Dockerfile's RUN step
+          # so /var/www/onlyoffice/documentserver is stored only ONCE in the final image (saving ~1.6 GB).
+          python3 - << 'EOF'
+          import sys
+
+          dockerfile_path = "Docker-DocumentServer/Dockerfile"
+          with open(dockerfile_path, "r", encoding="utf-8") as f:
+              df = f.read()
+
+          target_run = 'RUN PACKAGE_FILE='
+          replacement_run = 'RUN --mount=type=bind,source=documentserver-compiled,target=/tmp/documentserver-compiled \\\n    PACKAGE_FILE='
+          target_cleanup = 'rm -rf /tmp/$PACKAGE_FILE /var/log/$COMPANY_NAME /var/lib/apt/lists/*'
+          replacement_cleanup = (
+              'cp -a /tmp/documentserver-compiled/. /var/www/$COMPANY_NAME/documentserver/ && \\\n'
+              '    chown -R ds:ds /var/www/$COMPANY_NAME/documentserver && \\\n'
+              '    chmod +x /var/www/$COMPANY_NAME/documentserver/server/FileConverter/bin/x2t \\\n'
+              '             /var/www/$COMPANY_NAME/documentserver/server/tools/allfontsgen \\\n'
+              '             /var/www/$COMPANY_NAME/documentserver/server/tools/allthemesgen && \\\n'
+              '    rm -rf /tmp/$PACKAGE_FILE /var/log/$COMPANY_NAME /var/lib/apt/lists/*'
+          )
+
+          if target_run not in df or target_cleanup not in df:
+              print("ERROR: Expected RUN targets not found in Docker-DocumentServer/Dockerfile", file=sys.stderr)
+              sys.exit(1)
+
+          df = df.replace(target_run, replacement_run, 1).replace(target_cleanup, replacement_cleanup, 1)
+          with open(dockerfile_path, "w", encoding="utf-8") as f:
+              f.write(df)
+          print("=== Successfully patched Docker-DocumentServer/Dockerfile for single-layer build ===")
+          print(df)
+          EOF
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
