@@ -31,31 +31,48 @@ jobs:
         run: |
           echo "=== Disk space before cleanup ==="
           df -h
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo rm -rf /usr/local/share/boost
-          sudo rm -rf /usr/local/graalvm
-          sudo rm -rf /usr/local/share/powershell
-          sudo rm -rf /usr/share/swift
-          sudo rm -rf /usr/local/lib/node_modules
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /opt/hostedtoolcache/* \
+            /usr/local/share/boost \
+            /usr/local/graalvm \
+            /usr/local/share/powershell \
+            /usr/share/swift \
+            /usr/lib/jvm \
+            /usr/lib/google-cloud-sdk \
+            /usr/local/aws-cli \
+            /usr/local/aws-sam-cli \
+            /opt/az \
+            /usr/share/az_* \
+            /opt/microsoft \
+            /usr/local/sqlpackage \
+            /usr/lib/llvm-* \
+            /usr/local/julia* \
+            /usr/share/rust \
+            /usr/share/sbt \
+            /usr/share/gradle* \
+            /usr/share/maven* \
+            /usr/local/lib/node_modules
           sudo rm -f /usr/local/bin/grunt /usr/local/bin/pkg /usr/local/bin/yarn /usr/local/bin/corepack /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/node
           sudo docker image prune --all --force || true
           sudo apt-get autoremove -y
           sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
           echo "=== Disk space after cleanup ==="
           df -h
 
-      - name: Configure Swap Space (8 GB for C++/V8 Compilation)
+      - name: Configure Swap Space (4 GB for C++/V8 Compilation)
         run: |
           sudo swapoff -a || true
           sudo rm -f /swapfile /mnt/swapfile
-          sudo fallocate -l 8G /swapfile
+          sudo fallocate -l 4G /swapfile
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
           free -h
+          df -h
 
       - name: Install Base Build Prerequisites
         run: |
@@ -75,13 +92,16 @@ jobs:
         run: |
           git clone --depth 1 --branch "${ONLYOFFICE_VERSION}" https://github.com/ONLYOFFICE/build_tools.git build_tools
 
-      - name: Fetch Sub-Repositories (core, server, sdkjs, web-apps) & Hook Patch Script
+      - name: Fetch Sub-Repositories (core, server, sdkjs, web-apps) & Hook Patch + Disk-Cleanup Scripts
         run: |
           chmod +x "${GITHUB_WORKSPACE}/scripts/patch-limits.sh"
           
-          # Inject a hook right after base.update_repositories(repositories) in build_tools/make.py
-          # so that scripts/patch-limits.sh executes immediately after sub-repositories are cloned
-          # and before ./automate.py server compiles the C++ and JS sources.
+          # Inject hooks into build_tools/make.py and build_tools/scripts/build_sln.py:
+          # 1. Right after base.update_repositories(repositories): run scripts/patch-limits.sh
+          # 2. Right after make_common.make(): delete ~18 GB of intermediate V8/Boost/CEF/ICU build objects
+          #    while keeping libv8_monolith.a, icudtl.dat, and headers needed for linking core.
+          # 3. Inside build_sln.py after each qmake.make(): remove intermediate core_build .o files.
+          # 4. Right after build_sln.make(): delete static .a archives & 3rdParty build dirs before JS/Server packaging.
           python3 - << 'EOF'
           import os, sys
 
@@ -89,22 +109,97 @@ jobs:
           with open(make_py_path, "r", encoding="utf-8") as f:
               content = f.read()
 
-          target = "base.update_repositories(repositories)"
-          if target not in content:
+          # Hook 1: patch-limits.sh after update_repositories
+          target_update = "base.update_repositories(repositories)"
+          if target_update not in content:
               print("ERROR: Could not locate 'base.update_repositories(repositories)' in build_tools/make.py", file=sys.stderr)
               sys.exit(1)
 
           patch_hook = (
-              f"{target}\n"
+              f"{target_update}\n"
               f"  print('=== Executing custom patch-limits.sh hook ===')\n"
               f"  if os.system(os.environ['GITHUB_WORKSPACE'] + '/scripts/patch-limits.sh ' + os.path.abspath('.')) != 0:\n"
               f"    raise RuntimeError('patch-limits.sh failed!')"
           )
+          content = content.replace(target_update, patch_hook, 1)
 
-          content = content.replace(target, patch_hook, 1)
+          # Hook 2: Post-make_common.make() disk cleanup (~18 GB V8 & 3rdParty intermediate objects)
+          target_common = "make_common.make()"
+          if target_common not in content:
+              print("ERROR: Could not locate 'make_common.make()' in build_tools/make.py", file=sys.stderr)
+              sys.exit(1)
+
+          common_cleanup_cmd = (
+              "set -e; "
+              "CORE_3DP='../core/Common/3dParty'; "
+              "if [ -d \"$CORE_3DP/v8_89/v8/out.gn/linux_64/obj\" ]; then "
+              "  if [ -f \"$CORE_3DP/v8_89/v8/out.gn/linux_64/obj/libv8_monolith.a\" ]; then "
+              "    mv \"$CORE_3DP/v8_89/v8/out.gn/linux_64/obj/libv8_monolith.a\" /tmp/libv8_monolith.a; "
+              "    rm -rf \"$CORE_3DP/v8_89/v8/out.gn/linux_64/obj\"/*; "
+              "    mv /tmp/libv8_monolith.a \"$CORE_3DP/v8_89/v8/out.gn/linux_64/obj/libv8_monolith.a\"; "
+              "  fi; "
+              "  rm -rf \"$CORE_3DP/v8_89/v8/out.gn/linux_64/gen\" "
+              "         \"$CORE_3DP/v8_89/depot_tools\" "
+              "         \"$CORE_3DP/v8_89/v8/.git\" "
+              "         \"$CORE_3DP/v8_89/v8/third_party\" "
+              "         \"$CORE_3DP/v8_89/v8/third_party_new\" "
+              "         \"$CORE_3DP/v8_89/v8/test\" "
+              "         \"$CORE_3DP/v8_89/v8/tools\"; "
+              "fi; "
+              "rm -rf \"$CORE_3DP/boost/boost_1_72_0/bin.v2\" \"$CORE_3DP/boost/boost_1_72_0/.git\"; "
+              "rm -f \"$CORE_3DP/cef/linux_64/cef_binary.7z\"; "
+              "find \"$CORE_3DP/icu\" -name '*.o' -delete 2>/dev/null || true; "
+              "find \"$CORE_3DP/openssl\" -name '*.o' -delete 2>/dev/null || true; "
+              "df -h"
+          )
+          common_cleanup_hook = (
+              f"{target_common}\n"
+              f"print('=== Cleaning intermediate 3dParty build artifacts (V8, Boost, CEF, ICU) to free disk space ===')\n"
+              f"os.system({common_cleanup_cmd!r})"
+          )
+          content = content.replace(target_common, common_cleanup_hook, 1)
+
+          # Hook 4: Post-build_sln.make() cleanup
+          target_sln = "build_sln.make()"
+          if target_sln not in content:
+              print("ERROR: Could not locate 'build_sln.make()' in build_tools/make.py", file=sys.stderr)
+              sys.exit(1)
+
+          sln_cleanup_cmd = (
+              "rm -f ../core/Common/3dParty/v8_89/v8/out.gn/linux_64/obj/libv8_monolith.a; "
+              "rm -rf ../core/Common/3dParty/cef ../core/Common/3dParty/boost; "
+              "rm -f ../core/build/lib/linux_64/*.a; "
+              "df -h"
+          )
+          sln_cleanup_hook = (
+              f"{target_sln}\n"
+              f"print('=== Cleaning post-C++ static archives and 3dParty dirs before JS/Server build ===')\n"
+              f"os.system({sln_cleanup_cmd!r})"
+          )
+          content = content.replace(target_sln, sln_cleanup_hook, 1)
+
           with open(make_py_path, "w", encoding="utf-8") as f:
               f.write(content)
-          print("Successfully injected patch-limits.sh hook into build_tools/make.py")
+          print("Successfully injected patch and disk-cleanup hooks into build_tools/make.py")
+
+          # Hook 3: Per-project core_build object cleanup in build_tools/scripts/build_sln.py
+          build_sln_path = os.path.join("build_tools", "scripts", "build_sln.py")
+          with open(build_sln_path, "r", encoding="utf-8") as f:
+              sln_content = f.read()
+
+          target_qmake = "qmake.make(platform, pro, qmake_main_addon)"
+          if target_qmake not in sln_content:
+              print("ERROR: Could not locate qmake.make call in build_tools/scripts/build_sln.py", file=sys.stderr)
+              sys.exit(1)
+
+          qmake_cleanup = (
+              f"{target_qmake}\n"
+              f"      os.system('find ../core -type d -name \"core_build\" -prune -exec rm -rf {{}} + 2>/dev/null || true')"
+          )
+          sln_content = sln_content.replace(target_qmake, qmake_cleanup, 1)
+          with open(build_sln_path, "w", encoding="utf-8") as f:
+              f.write(sln_content)
+          print("Successfully injected per-project core_build cleanup into build_tools/scripts/build_sln.py")
           EOF
 
       - name: Compile Server Components (./automate.py server)
@@ -135,7 +230,12 @@ jobs:
                  "${GITHUB_WORKSPACE}/core" \
                  "${GITHUB_WORKSPACE}/sdkjs" \
                  "${GITHUB_WORKSPACE}/web-apps" \
-                 "${GITHUB_WORKSPACE}/server"
+                 "${GITHUB_WORKSPACE}/server" \
+                 "${GITHUB_WORKSPACE}/dictionaries" \
+                 "${GITHUB_WORKSPACE}/core-fonts" \
+                 "${GITHUB_WORKSPACE}/document-templates" \
+                 "${GITHUB_WORKSPACE}/onlyoffice.github.io" \
+                 "${GITHUB_WORKSPACE}/build_tools/out/js"
           df -h
 
       - name: Merge Built Artifacts with ONLYOFFICE/Docker-DocumentServer

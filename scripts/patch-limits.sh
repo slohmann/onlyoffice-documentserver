@@ -9,28 +9,28 @@
 #      (both modern v9/v10 React patch.jsx and legacy ExtJS Main.js).
 #   3. Performs strict pre- and post-patch grep validations so the build aborts
 #      immediately if upstream file structures or variable names change.
+#   4. Cleans unneeded .git packfiles from large asset sub-repositories to save
+#      several gigabytes of runner disk space during compilation.
 # ==============================================================================
 
 set -euo pipefail
 
 WORKSPACE_ROOT="${1:-$(pwd)}"
 if [[ -d "${WORKSPACE_ROOT}/build_tools/server" ]]; then
-  SERVER_DIR="${WORKSPACE_ROOT}/build_tools/server"
-  CORE_DIR="${WORKSPACE_ROOT}/build_tools/core"
-  WEBAPPS_DIR="${WORKSPACE_ROOT}/build_tools/web-apps"
+  REPO_BASE="${WORKSPACE_ROOT}/build_tools"
 elif [[ -d "${WORKSPACE_ROOT}/../server" ]]; then
-  SERVER_DIR="$(cd "${WORKSPACE_ROOT}/../server" && pwd)"
-  CORE_DIR="$(cd "${WORKSPACE_ROOT}/../core" && pwd)"
-  WEBAPPS_DIR="$(cd "${WORKSPACE_ROOT}/../web-apps" && pwd)"
+  REPO_BASE="$(cd "${WORKSPACE_ROOT}/.." && pwd)"
 elif [[ -d "${WORKSPACE_ROOT}/server" ]]; then
-  SERVER_DIR="${WORKSPACE_ROOT}/server"
-  CORE_DIR="${WORKSPACE_ROOT}/core"
-  WEBAPPS_DIR="${WORKSPACE_ROOT}/web-apps"
+  REPO_BASE="${WORKSPACE_ROOT}"
 else
   echo "[ERROR] Could not locate cloned sub-repositories ('server', 'core', 'web-apps')." >&2
   echo "        Checked relative to: ${WORKSPACE_ROOT}" >&2
   exit 1
 fi
+
+SERVER_DIR="${REPO_BASE}/server"
+CORE_DIR="${REPO_BASE}/core"
+WEBAPPS_DIR="${REPO_BASE}/web-apps"
 
 echo "=================================================================="
 echo "[INFO] Starting OnlyOffice Source Patching..."
@@ -194,6 +194,18 @@ if [[ "${PATCHED_MOBILE_COUNT}" -lt 3 ]]; then
   echo "[FATAL] Expected at least 3 mobile editor apps (document, spreadsheet, presentation) to be patched, but only patched ${PATCHED_MOBILE_COUNT}." >&2
   exit 1
 fi
+
+# ------------------------------------------------------------------------------
+# 5. Reclaim Disk Space by Removing Cloned .git Packfiles from Sub-Repositories
+# ------------------------------------------------------------------------------
+echo "[INFO] Cleaning .git/objects/pack from cloned sub-repositories to free disk space..."
+for subrepo in core dictionaries core-fonts onlyoffice.github.io document-templates sdkjs web-apps server; do
+  if [[ -d "${REPO_BASE}/${subrepo}/.git/objects/pack" ]]; then
+    rm -rf "${REPO_BASE}/${subrepo}/.git/objects/pack"/*
+    echo "       Cleaned packfiles in ${REPO_BASE}/${subrepo}/.git/objects/pack"
+  fi
+done
+df -h
 
 echo "=================================================================="
 echo "[SUCCESS] All OnlyOffice patches applied and verified (${PATCHED_MOBILE_COUNT} mobile editors unlocked, LICENSE_CONNECTIONS=9999)."
