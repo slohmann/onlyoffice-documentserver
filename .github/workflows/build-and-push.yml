@@ -250,6 +250,27 @@ jobs:
               with open(base_py_path, "w", encoding="utf-8") as f:
                   f.write(base_content)
               print("Enabled shallow --depth 1 git clones in build_tools/scripts/base.py")
+
+          # Hook 7: Backport upstream OnlyOffice v8_89.py fix ("Fix build") for depot_tools Python 3 bootstrap on Linux
+          v8_89_path = os.path.join("build_tools", "scripts", "core_common", "modules", "v8_89.py")
+          with open(v8_89_path, "r", encoding="utf-8") as f:
+              v8_content = f.read()
+          v8_content = v8_content.replace(
+              'if ("mac" == base.host_platform()):\n    base.set_env("DEPOT_TOOLS_BOOTSTRAP_PYTHON3", "0")',
+              'if ("windows" != base.host_platform()):\n    base.set_env("DEPOT_TOOLS_BOOTSTRAP_PYTHON3", "0")'
+          )
+          v8_content = v8_content.replace(
+              '    if ("linux" == base.host_platform()):\n'
+              '      if not base.is_file("./depot_tools/python3_bin_reldir.txt"):\n'
+              '        base.cmd_in_dir("./depot_tools", "./ensure_bootstrap", [], True)\n',
+              ''
+          )
+          if 'if ("windows" != base.host_platform()):\n    base.set_env("DEPOT_TOOLS_BOOTSTRAP_PYTHON3", "0")' not in v8_content or "ensure_bootstrap" in v8_content:
+              print("ERROR: Failed to apply depot_tools bootstrap fix to v8_89.py", file=sys.stderr)
+              sys.exit(1)
+          with open(v8_89_path, "w", encoding="utf-8") as f:
+              f.write(v8_content)
+          print("Patched build_tools/scripts/core_common/modules/v8_89.py (DEPOT_TOOLS_BOOTSTRAP_PYTHON3=0 on Linux)")
           EOF
 
       - name: Compile Server Components (./automate.py server)
@@ -268,7 +289,8 @@ jobs:
             export BUILD_NUMBER="1"
           fi
           export NODE_ENV="production"
-          echo "=== Exported PRODUCT_VERSION=${PRODUCT_VERSION}, BUILD_NUMBER=${BUILD_NUMBER}, NODE_ENV=${NODE_ENV} ==="
+          export DEPOT_TOOLS_BOOTSTRAP_PYTHON3="0"
+          echo "=== Exported PRODUCT_VERSION=${PRODUCT_VERSION}, BUILD_NUMBER=${BUILD_NUMBER}, NODE_ENV=${NODE_ENV}, DEPOT_TOOLS_BOOTSTRAP_PYTHON3=${DEPOT_TOOLS_BOOTSTRAP_PYTHON3} ==="
 
           # If ONLYOFFICE_VERSION is a tag (starts with 'v'), build_tools expects 'tags/<version>'
           # so that scripts/base.py skips running 'git pull' on a detached HEAD.
