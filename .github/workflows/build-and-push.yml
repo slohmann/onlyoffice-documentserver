@@ -110,7 +110,17 @@ jobs:
       - name: Compile Server Components (./automate.py server)
         run: |
           cd build_tools/tools/linux
-          ./automate.py server --branch="${ONLYOFFICE_VERSION}"
+          # If ONLYOFFICE_VERSION is a tag (starts with 'v'), build_tools expects 'tags/<version>'
+          # so that scripts/base.py skips running 'git pull' on a detached HEAD.
+          if [[ "${ONLYOFFICE_VERSION}" == "master" ]]; then
+            BUILD_BRANCH="master"
+          elif [[ "${ONLYOFFICE_VERSION}" == tags/* ]]; then
+            BUILD_BRANCH="${ONLYOFFICE_VERSION}"
+          else
+            BUILD_BRANCH="tags/${ONLYOFFICE_VERSION}"
+          fi
+          echo "=== Running automate.py with --branch=${BUILD_BRANCH} ==="
+          ./automate.py server --branch="${BUILD_BRANCH}"
           
           echo "=== Verifying build output in build_tools/out/linux_64/onlyoffice/documentserver ==="
           ls -la "${GITHUB_WORKSPACE}/build_tools/out/linux_64/onlyoffice/documentserver"
