@@ -40,6 +40,7 @@ jobs:
           sudo rm -rf /usr/local/share/powershell
           sudo rm -rf /usr/share/swift
           sudo rm -rf /usr/local/lib/node_modules
+          sudo rm -f /usr/local/bin/grunt /usr/local/bin/pkg /usr/local/bin/yarn /usr/local/bin/corepack /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/node
           sudo docker image prune --all --force || true
           sudo apt-get autoremove -y
           sudo apt-get clean
