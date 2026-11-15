@@ -1,0 +1,168 @@
+name: Build and Push Custom OnlyOffice DocumentServer
+
+on:
+  workflow_dispatch:
+    inputs:
+      onlyoffice_version:
+        description: 'OnlyOffice build_tools Git Tag (e.g., v10.0.1.11)'
+        required: true
+        default: 'v10.0.1.11'
+        type: string
+  schedule:
+    # Optional: Run monthly on the 1st at 02:00 UTC
+    - cron: '0 2 1 * *'
+
+env:
+  ONLYOFFICE_VERSION: ${{ github.event.inputs.onlyoffice_version || 'v10.0.1.11' }}
+  DOCKER_IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/onlyoffice-documentserver
+  PLATFORM: linux/amd64
+
+jobs:
+  build-and-push:
+    name: Build OnlyOffice (${{ github.event.inputs.onlyoffice_version || 'v10.0.1.11' }}) for linux/amd64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Maximize Runner Disk Space (Cleanup pre-installed packages)
+        run: |
+          echo "=== Disk space before cleanup ==="
+          df -h
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf /usr/local/graalvm
+          sudo rm -rf /usr/local/share/powershell
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/local/lib/node_modules
+          sudo docker image prune --all --force || true
+          sudo apt-get autoremove -y
+          sudo apt-get clean
+          echo "=== Disk space after cleanup ==="
+          df -h
+
+      - name: Configure Swap Space (8 GB for C++/V8 Compilation)
+        run: |
+          sudo fallocate -l 8G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+
+      - name: Install Base Build Prerequisites
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            python3 \
+            python3-pip \
+            python-is-python3 \
+            git \
+            curl \
+            wget \
+            build-essential \
+            sudo \
+            ca-certificates
+
+      - name: Clone ONLYOFFICE/build_tools (${{ env.ONLYOFFICE_VERSION }})
+        run: |
+          git clone --depth 1 --branch "${ONLYOFFICE_VERSION}" https://github.com/ONLYOFFICE/build_tools.git build_tools
+
+      - name: Fetch Sub-Repositories (core, server, sdkjs, web-apps) & Hook Patch Script
+        run: |
+          chmod +x "${GITHUB_WORKSPACE}/scripts/patch-limits.sh"
+          
+          # Inject a hook right after base.update_repositories(repositories) in build_tools/make.py
+          # so that scripts/patch-limits.sh executes immediately after sub-repositories are cloned
+          # and before ./automate.py server compiles the C++ and JS sources.
+          python3 - << 'EOF'
+          import os, sys
+
+          make_py_path = os.path.join("build_tools", "make.py")
+          with open(make_py_path, "r", encoding="utf-8") as f:
+              content = f.read()
+
+          target = "base.update_repositories(repositories)"
+          if target not in content:
+              print("ERROR: Could not locate 'base.update_repositories(repositories)' in build_tools/make.py", file=sys.stderr)
+              sys.exit(1)
+
+          patch_hook = (
+              f"{target}\n"
+              f"  print('=== Executing custom patch-limits.sh hook ===')\n"
+              f"  if os.system(os.environ['GITHUB_WORKSPACE'] + '/scripts/patch-limits.sh ' + os.path.abspath('.')) != 0:\n"
+              f"    raise RuntimeError('patch-limits.sh failed!')"
+          )
+
+          content = content.replace(target, patch_hook, 1)
+          with open(make_py_path, "w", encoding="utf-8") as f:
+              f.write(content)
+          print("Successfully injected patch-limits.sh hook into build_tools/make.py")
+          EOF
+
+      - name: Compile Server Components (./automate.py server)
+        run: |
+          cd build_tools/tools/linux
+          ./automate.py server --branch="${ONLYOFFICE_VERSION}"
+          
+          echo "=== Verifying build output in build_tools/out/linux_64/onlyoffice/documentserver ==="
+          ls -la "${GITHUB_WORKSPACE}/build_tools/out/linux_64/onlyoffice/documentserver"
+
+      - name: Clean Intermediate Build Sources to Reclaim Disk Space
+        run: |
+          echo "=== Reclaiming disk space before Docker build ==="
+          rm -rf "${GITHUB_WORKSPACE}/build_tools/core" \
+                 "${GITHUB_WORKSPACE}/build_tools/sdkjs" \
+                 "${GITHUB_WORKSPACE}/build_tools/web-apps" \
+                 "${GITHUB_WORKSPACE}/build_tools/server" \
+                 "${GITHUB_WORKSPACE}/core" \
+                 "${GITHUB_WORKSPACE}/sdkjs" \
+                 "${GITHUB_WORKSPACE}/web-apps" \
+                 "${GITHUB_WORKSPACE}/server"
+          df -h
+
+      - name: Merge Built Artifacts with ONLYOFFICE/Docker-DocumentServer
+        run: |
+          git clone --depth 1 --branch "${ONLYOFFICE_VERSION}" https://github.com/ONLYOFFICE/Docker-DocumentServer.git Docker-DocumentServer || \
+          git clone --depth 1 https://github.com/ONLYOFFICE/Docker-DocumentServer.git Docker-DocumentServer
+
+          # Move compiled server artifacts into Docker build context
+          mv "${GITHUB_WORKSPACE}/build_tools/out/linux_64/onlyoffice/documentserver" \
+             "${GITHUB_WORKSPACE}/Docker-DocumentServer/documentserver-compiled"
+
+          # Append overlay steps to official Dockerfile:
+          # The official Dockerfile sets up OS dependencies, Nginx, Supervisor, user 'ds', and base directories.
+          # We then overwrite /var/www/onlyoffice/documentserver/ with our freshly compiled & patched artifacts.
+          cat << 'DOCKERFILE_EOF' >> "${GITHUB_WORKSPACE}/Docker-DocumentServer/Dockerfile"
+
+          # --- Overlay Custom Compiled & Patched OnlyOffice DocumentServer Artifacts ---
+          COPY documentserver-compiled/ /var/www/onlyoffice/documentserver/
+          RUN chown -R ds:ds /var/www/onlyoffice/documentserver && \
+              chmod +x /var/www/onlyoffice/documentserver/server/FileConverter/bin/x2t && \
+              chmod +x /var/www/onlyoffice/documentserver/server/tools/allfontsgen && \
+              chmod +x /var/www/onlyoffice/documentserver/server/tools/allthemesgen
+          DOCKERFILE_EOF
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and Push Docker Image (linux/amd64)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./Docker-DocumentServer
+          file: ./Docker-DocumentServer/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/onlyoffice-documentserver:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/onlyoffice-documentserver:${{ env.ONLYOFFICE_VERSION }}
