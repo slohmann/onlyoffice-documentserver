@@ -8,6 +8,15 @@ on:
         required: true
         default: 'v10.0.0.169'
         type: string
+      platforms:
+        description: 'Target architecture(s) to build and push'
+        required: true
+        default: 'linux/amd64,linux/arm64'
+        type: choice
+        options:
+          - 'linux/amd64,linux/arm64'
+          - 'linux/amd64'
+          - 'linux/arm64'
   schedule:
     # Optional: Run monthly on the 1st at 02:00 UTC
     - cron: '0 2 1 * *'
@@ -15,13 +24,27 @@ on:
 env:
   ONLYOFFICE_VERSION: ${{ github.event.inputs.onlyoffice_version || 'v10.0.0.169' }}
   DOCKER_IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/onlyoffice-documentserver
-  PLATFORM: linux/amd64
 
 jobs:
-  build-and-push:
-    name: Build OnlyOffice (${{ github.event.inputs.onlyoffice_version || 'v10.0.0.169' }}) for linux/amd64
+  build:
+    name: Build OnlyOffice (${{ github.event.inputs.onlyoffice_version || 'v10.0.0.169' }}) [${{ matrix.arch }}]
+    if: contains(inputs.platforms || 'linux/amd64,linux/arm64', matrix.docker_platform)
     runs-on: ubuntu-24.04
     timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            docker_platform: linux/amd64
+            oo_platform: linux_64
+            qt_sysroot_target: amd64
+            strip_bin: strip
+          - arch: arm64
+            docker_platform: linux/arm64
+            oo_platform: linux_arm64
+            qt_sysroot_target: all
+            strip_bin: aarch64-linux-gnu-strip
 
     steps:
       - name: Checkout Repository
@@ -85,6 +108,7 @@ jobs:
             curl \
             wget \
             build-essential \
+            binutils-aarch64-linux-gnu \
             sudo \
             ca-certificates
 
@@ -93,6 +117,8 @@ jobs:
           git clone --depth 1 --branch "${ONLYOFFICE_VERSION}" https://github.com/ONLYOFFICE/build_tools.git build_tools
 
       - name: Fetch Sub-Repositories (core, server, sdkjs, web-apps) & Hook Patch + Disk-Cleanup Scripts
+        env:
+          QT_SYSROOT_TARGET: ${{ matrix.qt_sysroot_target }}
         run: |
           chmod +x "${GITHUB_WORKSPACE}/scripts/patch-limits.sh"
           
@@ -132,14 +158,18 @@ jobs:
           common_cleanup_cmd = (
               "set -e; "
               "CORE_3DP='../core/Common/3dParty'; "
-              "if [ -d \"$CORE_3DP/v8_89/v8/out.gn/linux_64/obj\" ]; then "
-              "  if [ -f \"$CORE_3DP/v8_89/v8/out.gn/linux_64/obj/libv8_monolith.a\" ]; then "
-              "    mv \"$CORE_3DP/v8_89/v8/out.gn/linux_64/obj/libv8_monolith.a\" /tmp/libv8_monolith.a; "
-              "    rm -rf \"$CORE_3DP/v8_89/v8/out.gn/linux_64/obj\"/*; "
-              "    mv /tmp/libv8_monolith.a \"$CORE_3DP/v8_89/v8/out.gn/linux_64/obj/libv8_monolith.a\"; "
+              "for PLAT in linux_64 linux_arm64; do "
+              "  if [ -d \"$CORE_3DP/v8_89/v8/out.gn/$PLAT/obj\" ]; then "
+              "    if [ -f \"$CORE_3DP/v8_89/v8/out.gn/$PLAT/obj/libv8_monolith.a\" ]; then "
+              "      mv \"$CORE_3DP/v8_89/v8/out.gn/$PLAT/obj/libv8_monolith.a\" \"/tmp/libv8_monolith_${PLAT}.a\"; "
+              "      rm -rf \"$CORE_3DP/v8_89/v8/out.gn/$PLAT/obj\"/*; "
+              "      mv \"/tmp/libv8_monolith_${PLAT}.a\" \"$CORE_3DP/v8_89/v8/out.gn/$PLAT/obj/libv8_monolith.a\"; "
+              "    fi; "
+              "    rm -rf \"$CORE_3DP/v8_89/v8/out.gn/$PLAT/gen\"; "
               "  fi; "
-              "  rm -rf \"$CORE_3DP/v8_89/v8/out.gn/linux_64/gen\" "
-              "         \"$CORE_3DP/v8_89/depot_tools\" "
+              "done; "
+              "if [ -d \"$CORE_3DP/v8_89/v8\" ]; then "
+              "  rm -rf \"$CORE_3DP/v8_89/depot_tools\" "
               "         \"$CORE_3DP/v8_89/v8/.git\" "
               "         \"$CORE_3DP/v8_89/v8/third_party\" "
               "         \"$CORE_3DP/v8_89/v8/third_party_new\" "
@@ -147,7 +177,7 @@ jobs:
               "         \"$CORE_3DP/v8_89/v8/tools\"; "
               "fi; "
               "rm -rf \"$CORE_3DP/boost/boost_1_72_0/bin.v2\" \"$CORE_3DP/boost/boost_1_72_0/.git\"; "
-              "rm -f \"$CORE_3DP/cef/linux_64/cef_binary.7z\"; "
+              "rm -f \"$CORE_3DP\"/cef/*/cef_binary.7z; "
               "find \"$CORE_3DP/icu\" -name '*.o' -delete 2>/dev/null || true; "
               "find \"$CORE_3DP/openssl\" -name '*.o' -delete 2>/dev/null || true; "
               "df -h"
@@ -166,9 +196,9 @@ jobs:
               sys.exit(1)
 
           sln_cleanup_cmd = (
-              "rm -f ../core/Common/3dParty/v8_89/v8/out.gn/linux_64/obj/libv8_monolith.a; "
+              "rm -f ../core/Common/3dParty/v8_89/v8/out.gn/*/obj/libv8_monolith.a; "
               "rm -rf ../core/Common/3dParty/cef ../core/Common/3dParty/boost; "
-              "rm -f ../core/build/lib/linux_64/*.a; "
+              "rm -f ../core/build/lib/*/*.a; "
               "df -h"
           )
           sln_cleanup_hook = (
@@ -201,17 +231,19 @@ jobs:
               f.write(sln_content)
           print("Successfully injected per-project core_build cleanup into build_tools/scripts/build_sln.py")
 
-          # Hook 5: Restrict automate.py Qt and sysroot downloads to amd64 only (skip arm64)
+          # Hook 5: Configure automate.py Qt and sysroot downloads ('amd64' for x86_64 builds,
+          # 'all' for arm64 cross-compilation because x86_64 host qmake/gcc cross-tools + arm64 target libs are both needed)
           # and delete downloaded .7z / .tar.gz archives immediately after extraction (~6 GB saved)
+          qt_sysroot_target = os.environ.get("QT_SYSROOT_TARGET", "all")
           automate_path = os.path.join("build_tools", "tools", "linux", "automate.py")
           if os.path.isfile(automate_path):
               with open(automate_path, "r", encoding="utf-8") as f:
                   auto_content = f.read()
-              auto_content = auto_content.replace('["./qt_binary_fetch.py", "all"]', '["./qt_binary_fetch.py", "amd64"]')
-              auto_content = auto_content.replace('["./fetch.py", "all"]', '["./fetch.py", "amd64"]')
+              auto_content = auto_content.replace('["./qt_binary_fetch.py", "all"]', f'["./qt_binary_fetch.py", "{qt_sysroot_target}"]')
+              auto_content = auto_content.replace('["./fetch.py", "all"]', f'["./fetch.py", "{qt_sysroot_target}"]')
               with open(automate_path, "w", encoding="utf-8") as f:
                   f.write(auto_content)
-              print("Restricted automate.py qt_binary_fetch and sysroot fetch to amd64 only")
+              print(f"Configured automate.py qt_binary_fetch and sysroot fetch target: {qt_sysroot_target}")
 
           for fetch_script in [
               os.path.join("build_tools", "tools", "linux", "qt_binary_fetch.py"),
@@ -274,6 +306,8 @@ jobs:
           EOF
 
       - name: Compile Server Components (./automate.py server)
+        env:
+          OO_PLATFORM: ${{ matrix.oo_platform }}
         run: |
           cd build_tools/tools/linux
           # Derive PRODUCT_VERSION (e.g. 10.0.0) and BUILD_NUMBER (e.g. 169) from ONLYOFFICE_VERSION (v10.0.0.169)
@@ -290,7 +324,7 @@ jobs:
           fi
           export NODE_ENV="production"
           export DEPOT_TOOLS_BOOTSTRAP_PYTHON3="0"
-          echo "=== Exported PRODUCT_VERSION=${PRODUCT_VERSION}, BUILD_NUMBER=${BUILD_NUMBER}, NODE_ENV=${NODE_ENV}, DEPOT_TOOLS_BOOTSTRAP_PYTHON3=${DEPOT_TOOLS_BOOTSTRAP_PYTHON3} ==="
+          echo "=== Exported PRODUCT_VERSION=${PRODUCT_VERSION}, BUILD_NUMBER=${BUILD_NUMBER}, NODE_ENV=${NODE_ENV}, DEPOT_TOOLS_BOOTSTRAP_PYTHON3=${DEPOT_TOOLS_BOOTSTRAP_PYTHON3}, OO_PLATFORM=${OO_PLATFORM} ==="
 
           # If ONLYOFFICE_VERSION is a tag (starts with 'v'), build_tools expects 'tags/<version>'
           # so that scripts/base.py skips running 'git pull' on a detached HEAD.
@@ -301,11 +335,11 @@ jobs:
           else
             BUILD_BRANCH="tags/${ONLYOFFICE_VERSION}"
           fi
-          echo "=== Running automate.py with --branch=${BUILD_BRANCH} ==="
-          ./automate.py server --branch="${BUILD_BRANCH}" --update-light="1"
+          echo "=== Running automate.py with --branch=${BUILD_BRANCH} --platform=${OO_PLATFORM} ==="
+          ./automate.py server --branch="${BUILD_BRANCH}" --platform="${OO_PLATFORM}" --update-light="1"
           
-          echo "=== Verifying build output in build_tools/out/linux_64/onlyoffice/documentserver ==="
-          ls -la "${GITHUB_WORKSPACE}/build_tools/out/linux_64/onlyoffice/documentserver"
+          echo "=== Verifying build output in build_tools/out/${OO_PLATFORM}/onlyoffice/documentserver ==="
+          ls -la "${GITHUB_WORKSPACE}/build_tools/out/${OO_PLATFORM}/onlyoffice/documentserver"
 
       - name: Clean Intermediate Build Sources to Reclaim Disk Space
         run: |
@@ -326,23 +360,26 @@ jobs:
           df -h
 
       - name: Merge Built Artifacts with ONLYOFFICE/Docker-DocumentServer
+        env:
+          OO_PLATFORM: ${{ matrix.oo_platform }}
+          STRIP_BIN: ${{ matrix.strip_bin }}
         run: |
           git clone --depth 1 --branch "${ONLYOFFICE_VERSION}" https://github.com/ONLYOFFICE/Docker-DocumentServer.git Docker-DocumentServer || \
           git clone --depth 1 https://github.com/ONLYOFFICE/Docker-DocumentServer.git Docker-DocumentServer
 
           # Move compiled server artifacts into Docker build context
-          mv "${GITHUB_WORKSPACE}/build_tools/out/linux_64/onlyoffice/documentserver" \
+          mv "${GITHUB_WORKSPACE}/build_tools/out/${OO_PLATFORM}/onlyoffice/documentserver" \
              "${GITHUB_WORKSPACE}/Docker-DocumentServer/documentserver-compiled"
 
           # Strip debug symbols ONLY from pure C++ ELF binaries and shared libraries (not pkg Node.js executables)
-          echo "=== Stripping debug symbols from C++ binaries and shared libraries ==="
+          echo "=== Stripping debug symbols from C++ binaries and shared libraries (${STRIP_BIN}) ==="
           du -sh "${GITHUB_WORKSPACE}/Docker-DocumentServer/documentserver-compiled"
-          strip --strip-unneeded \
+          "${STRIP_BIN}" --strip-unneeded \
             "${GITHUB_WORKSPACE}/Docker-DocumentServer/documentserver-compiled/server/FileConverter/bin/x2t" \
             "${GITHUB_WORKSPACE}/Docker-DocumentServer/documentserver-compiled/server/tools/allfontsgen" \
             "${GITHUB_WORKSPACE}/Docker-DocumentServer/documentserver-compiled/server/tools/allthemesgen" || true
           find "${GITHUB_WORKSPACE}/Docker-DocumentServer/documentserver-compiled/server/FileConverter/bin" \
-            -maxdepth 1 -type f -name "*.so*" -exec strip --strip-unneeded {} + || true
+            -maxdepth 1 -type f -name "*.so*" -exec "${STRIP_BIN}" --strip-unneeded {} + || true
           du -sh "${GITHUB_WORKSPACE}/Docker-DocumentServer/documentserver-compiled"
 
           # Inject single-layer BuildKit bind-mount overlay directly into the official Dockerfile's RUN step
@@ -377,6 +414,12 @@ jobs:
           print(df)
           EOF
 
+      - name: Set up QEMU (for arm64 container packaging)
+        if: matrix.arch == 'arm64'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: linux/arm64
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -386,13 +429,90 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and Push Docker Image (linux/amd64)
+      - name: Build and Push Docker Image (${{ matrix.docker_platform }})
         uses: docker/build-push-action@v6
         with:
           context: ./Docker-DocumentServer
           file: ./Docker-DocumentServer/Dockerfile
-          platforms: linux/amd64
+          platforms: ${{ matrix.docker_platform }}
           push: true
           tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/onlyoffice-documentserver:latest
-            ${{ secrets.DOCKERHUB_USERNAME }}/onlyoffice-documentserver:${{ env.ONLYOFFICE_VERSION }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/onlyoffice-documentserver:${{ env.ONLYOFFICE_VERSION }}-${{ matrix.arch }}
+
+  merge-manifest:
+    name: Publish Multi-Arch Manifest (${{ github.event.inputs.onlyoffice_version || 'v10.0.0.169' }})
+    needs: build
+    if: always() && !cancelled() && needs.build.result == 'success'
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Create and Push Multi-Arch Manifest List
+        env:
+          DOCKERHUB_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: |
+          IMAGE_REPO="${DOCKERHUB_USER}/onlyoffice-documentserver"
+          SOURCES=()
+
+          if docker buildx imagetools inspect --raw "${IMAGE_REPO}:${ONLYOFFICE_VERSION}" >/tmp/current-manifest.json 2>/dev/null; then
+            docker buildx imagetools inspect "${IMAGE_REPO}:${ONLYOFFICE_VERSION}" >/tmp/current-inspect.txt 2>/dev/null || true
+          else
+            rm -f /tmp/current-manifest.json /tmp/current-inspect.txt
+          fi
+
+          for ARCH in amd64 arm64; do
+            ARCH_TAG="${IMAGE_REPO}:${ONLYOFFICE_VERSION}-${ARCH}"
+            if docker buildx imagetools inspect "${ARCH_TAG}" >/dev/null 2>&1; then
+              SOURCES+=("${ARCH_TAG}")
+            elif [ -f /tmp/current-manifest.json ]; then
+              # Preserve an existing single-arch or indexed image when only the other arch was built in this run
+              EXISTING_REF=$(python3 - "${IMAGE_REPO}" "${ONLYOFFICE_VERSION}" "${ARCH}" << 'PY'
+          import json, sys
+
+          repo, version, arch = sys.argv[1], sys.argv[2], sys.argv[3]
+          with open("/tmp/current-manifest.json", "r", encoding="utf-8") as f:
+              data = json.load(f)
+
+          if "manifests" in data:
+              for m in data["manifests"]:
+                  p = m.get("platform", {})
+                  if p.get("os") == "linux" and p.get("architecture") == arch:
+                      print(f"{repo}@{m['digest']}")
+                      sys.exit(0)
+          elif __import__("os").path.isfile("/tmp/current-inspect.txt"):
+              with open("/tmp/current-inspect.txt", "r", encoding="utf-8") as f:
+                  if f"linux/{arch}" in f.read():
+                      print(f"{repo}:{version}")
+          PY
+              )
+              if [ -n "${EXISTING_REF}" ]; then
+                echo "=== Preserving existing ${ARCH} image (${EXISTING_REF}) under ${ARCH_TAG} ==="
+                docker buildx imagetools create -t "${ARCH_TAG}" "${EXISTING_REF}"
+                SOURCES+=("${ARCH_TAG}")
+              fi
+            fi
+          done
+
+          rm -f /tmp/current-manifest.json /tmp/current-inspect.txt
+
+          if [ "${#SOURCES[@]}" -eq 0 ]; then
+            echo "ERROR: No architecture images found for ${IMAGE_REPO}:${ONLYOFFICE_VERSION}" >&2
+            exit 1
+          fi
+
+          echo "=== Publishing multi-arch manifest list from: ${SOURCES[*]} ==="
+          docker buildx imagetools create \
+            -t "${IMAGE_REPO}:${ONLYOFFICE_VERSION}" \
+            -t "${IMAGE_REPO}:latest" \
+            "${SOURCES[@]}"
+
+          echo "=== Final Manifest ==="
+          docker buildx imagetools inspect "${IMAGE_REPO}:${ONLYOFFICE_VERSION}"

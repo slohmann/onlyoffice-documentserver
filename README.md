@@ -1,74 +1,37 @@
-# Custom OnlyOffice DocumentServer Builder (`linux/amd64`)
+# Custom ONLYOFFICE DocumentServer Builder (`linux/amd64` & `linux/arm64`)
 
-Automatisierte GitHub-Actions-Pipeline zum Kompilieren und Veröffentlichen eines angepassten **OnlyOffice DocumentServer** Docker-Images (`linux/amd64` / `x86_64`) auf Basis der offiziellen `ONLYOFFICE/build_tools` und `ONLYOFFICE/Docker-DocumentServer` Repositories.
+Automated GitHub Actions pipeline to compile **ONLYOFFICE DocumentServer** from source, apply connection and mobile-editing patches, and publish slim multi-architecture Docker images (`linux/amd64` and `linux/arm64/v8`) based on the official [`ONLYOFFICE/build_tools`](https://github.com/ONLYOFFICE/build_tools) and [`ONLYOFFICE/Docker-DocumentServer`](https://github.com/ONLYOFFICE/Docker-DocumentServer) repositories.
 
-## Features des Custom-Builds
-- **Kein 20-Verbindungen-Limit:** Setzt `LICENSE_CONNECTIONS = 9999` direkt im Quellcode (`server/Common/sources/constants.js` & `license.js`), kompatibel sowohl mit v8/v9 als auch v10.x.
-- **Aktiviertes Mobile-Editing:** Schaltet die Editierfunktion in mobilen Browsern und WebViews (`isSupportEditFeature -> true`) für Document-, Spreadsheet- und Presentation-Editoren frei.
-- **Fail-Fast Patch-Validierung:** `scripts/patch-limits.sh` prüft vor und nach dem Patchen per `grep`, ob alle Zielstrukturen exakt gegriffen haben. Bei unerwarteten Upstream-Änderungen bricht der Build sofort kontrolliert ab.
-- **GitHub-Runner Disk-Optimierung:** Bereinigt vorab unnötige Toolchains (`.NET`, `Android SDK`, `Haskell`, `CodeQL`, `Boost`) und richtet ein 8 GB Swapfile für den speicherintensiven C++/V8-Build ein.
+> **Disclaimer:** This is an unofficial community build repository and is not affiliated with or endorsed by Ascensio System SIA / ONLYOFFICE. Upstream ONLYOFFICE DocumentServer source code is licensed under AGPL-3.0; verify license compliance for your intended use case before deploying.
 
 ---
 
-## Welche Versionsnummer (`onlyoffice_version`) wird verwendet?
+## Features
 
-Maßgeblich ist ein offizieller **DocumentServer-Release-Tag**, der sowohl in [`ONLYOFFICE/build_tools`](https://github.com/ONLYOFFICE/build_tools/tags) als auch in [`ONLYOFFICE/server`](https://github.com/ONLYOFFICE/server/tags) existiert und mit dem offiziellen `.deb`-Release übereinstimmt (aktuell: **`v10.0.0.169`**, entsprechend Paketversion `10.0.0-169`).
-
-Die aktuellste veröffentlichte Paketversion lässt sich jederzeit mit folgendem Befehl abfragen (Bindestrich `-` durch Punkt `.` ersetzen und `v` voranstellen):
-```bash
-curl -sL "https://download.onlyoffice.com/repo/debian/dists/squeeze/main/binary-amd64/Packages" | grep -A 10 "^Package: onlyoffice-documentserver$" | grep "^Version:" | head -n 1
-```
-
----
-
-## 1. Einrichtung der GitHub Secrets
-
-Damit die GitHub Actions Pipeline das fertige Docker-Image in deinen Docker Hub Account pushen kann, müssen im GitHub-Repository zwei **Actions Secrets** hinterlegt werden:
-
-1. Erstelle auf [Docker Hub](https://hub.docker.com/settings/security) ein Personal Access Token (PAT) mit **Read, Write, Delete**-Berechtigungen.
-2. Navigiere in deinem GitHub-Repository zu **Settings → Secrets and variables → Actions → New repository secret**.
-3. Lege die folgenden beiden Secrets an:
-   - `DOCKERHUB_USERNAME`: Dein Docker Hub Benutzername.
-   - `DOCKERHUB_TOKEN`: Das zuvor generierte Docker Hub Access Token.
+- **Raised Connection Limit (`LICENSE_CONNECTIONS = 9999`):** Patches `server/Common/sources/constants.js` and `server/Common/sources/license.js` prior to compilation to raise the default 20 concurrent connections limit to `9999` (`LICENSE_USERS = 9999`).
+- **Mobile Web Editing Enabled:** Unlocks editing in mobile browsers and WebViews (`isSupportEditFeature -> true`) across the Document, Spreadsheet, and Presentation editors in `web-apps`.
+- **Multi-Architecture Docker Images (`linux/amd64` & `linux/arm64`):** Builds native `x86_64` and cross-compiled `aarch64` (`linux_arm64`) server binaries, packages them into Ubuntu 24.04 containers, and publishes a unified multi-arch manifest list (`:latest` and `:<onlyoffice_version>`) compatible with both x86_64 servers and ARM64 instances (e.g., Oracle Cloud Ampere A1, AWS Graviton, Raspberry Pi).
+- **Slim Image Size (Single-Layer Overlay):** Strips debug symbols from compiled C++ ELF binaries/shared libraries (`x2t`, `allfontsgen`, `allthemesgen`, `*.so*`) and uses a BuildKit bind-mount overlay inside the official Dockerfile `RUN` step so `/var/www/onlyoffice/documentserver` is stored only once in the final image.
+- **Fail-Fast Patch Verification:** [`scripts/patch-limits.sh`](scripts/patch-limits.sh) validates target patterns both before and after patching so upstream source changes fail immediately rather than silently producing an unpatched image.
+- **Standard GitHub Runner Compatible:** Frees pre-installed runner toolchains, configures a 4 GB swapfile, uses shallow Git clones (`--depth 1`), and prunes intermediate V8/Boost/CEF/QMake build artifacts during compilation so the build fits within standard 72 GB GitHub-hosted runners.
 
 ---
 
-## 2. Build / Update über GitHub Actions anstoßen
+## Quick Start (`docker-compose.yml`)
 
-### Manuell per Knopfdruck (`workflow_dispatch`)
-1. Öffne im GitHub-Repository den Reiter **Actions**.
-2. Wähle links den Workflow **Build and Push Custom OnlyOffice DocumentServer**.
-3. Klicke rechts auf **Run workflow**.
-4. Gib im Feld `OnlyOffice Release Git Tag` den gewünschten Release-Tag ein (Standard: `v10.0.0.169`).
-5. Klicke auf **Run workflow**.
-
-> **Hinweis zur Build-Dauer:** Da `build_tools` den gesamten C++-Kern (`core`), die V8-Engine sowie `sdkjs`, `web-apps` und `server` aus dem Quellcode kompiliert, dauert ein Durchlauf auf einem Standard-GitHub-Runner ca. **2,5 bis 4 Stunden**.
-
-### Automatisch per Zeitplan (`schedule`)
-Der Workflow ist zusätzlich so konfiguriert, dass er am **1. jedes Monats um 02:00 UTC** automatisch durchläuft.
-
-Nach erfolgreichem Durchlauf stehen auf Docker Hub zwei Tags bereit:
-- `<DOCKERHUB_USERNAME>/onlyoffice-documentserver:latest`
-- `<DOCKERHUB_USERNAME>/onlyoffice-documentserver:<onlyoffice_version>`
-
----
-
-## 3. Deployment auf dem Ziel-Host (`docker-compose.yml`)
-
-Erstelle auf deinem Ziel-Server (`linux/amd64`) ein Verzeichnis (z. B. `/opt/onlyoffice`) und lege dort folgende `docker-compose.yml` an:
+Create a directory on your host (for example `/opt/onlyoffice`) and add the following `docker-compose.yml` (Docker automatically selects `linux/amd64` or `linux/arm64/v8` from the multi-arch manifest; replace `slohmann` with your own Docker Hub username if you forked and built your own image):
 
 ```yaml
 services:
   onlyoffice-documentserver:
-    image: <DEIN_DOCKERHUB_USERNAME>/onlyoffice-documentserver:latest
+    image: slohmann/onlyoffice-documentserver:latest
     container_name: onlyoffice-documentserver
     restart: unless-stopped
-    platform: linux/amd64
     ports:
       - "8080:80"
     environment:
       - JWT_ENABLED=true
-      - JWT_SECRET=BitteDurchEinSicheresGeheimnisErsetzen123!
+      - JWT_SECRET=CHANGE_ME_TO_A_LONG_RANDOM_SECRET
       - JWT_HEADER=Authorization
       - JWT_IN_BODY=true
     volumes:
@@ -79,16 +42,67 @@ services:
     shm_size: '2gb'
 ```
 
-### Container starten & aktualisieren
+### Start & Update
 
 ```bash
-# Container im Hintergrund starten
+# Start container in the background (first-time DB/font initialization takes ~1-2 minutes)
 docker compose up -d
 
-# Logs prüfen (Initialisierung dauert beim ersten Start ca. 1-2 Minuten)
+# Follow startup logs
 docker compose logs -f
 
-# Späteres Update auf eine neu gebaute Version
+# Update to a newly published image
 docker compose pull
 docker compose up -d
 ```
+
+---
+
+## Building Your Own Image via GitHub Actions
+
+### 1. Configure Repository Secrets
+
+Fork this repository and configure two **Actions Secrets** so GitHub Actions can push images to your Docker Hub account:
+
+1. Create a Docker Hub Personal Access Token (PAT) at [Docker Hub Security Settings](https://hub.docker.com/settings/security) with **Read, Write, Delete** permissions.
+2. Open **Settings → Secrets and variables → Actions → New repository secret** in your GitHub fork.
+3. Add:
+   - `DOCKERHUB_USERNAME`: Your Docker Hub username.
+   - `DOCKERHUB_TOKEN`: Your Docker Hub Personal Access Token.
+
+### 2. Choosing `onlyoffice_version`
+
+Use an official release tag that exists across `ONLYOFFICE/build_tools`, `ONLYOFFICE/server`, `ONLYOFFICE/core`, `ONLYOFFICE/sdkjs`, and `ONLYOFFICE/web-apps` and matches the published Debian package version (default: `v10.0.0.169`).
+
+You can check the latest published Debian package version at any time (replace `-` with `.` and prefix with `v`):
+
+```bash
+curl -sL "https://download.onlyoffice.com/repo/debian/dists/squeeze/main/binary-amd64/Packages" \
+  | grep -A 10 "^Package: onlyoffice-documentserver$" \
+  | grep "^Version:" \
+  | head -n 1
+```
+
+### 3. Triggering a Build
+
+#### Manual Trigger (`workflow_dispatch`)
+1. Go to the **Actions** tab in your repository.
+2. Select **Build and Push Custom OnlyOffice DocumentServer**.
+3. Click **Run workflow**.
+4. Enter `onlyoffice_version` (default: `v10.0.0.169`) and choose `platforms`:
+   - `linux/amd64,linux/arm64` *(default — builds both architectures in parallel and merges them into one multi-arch manifest)*
+   - `linux/amd64` *(builds `x86_64` only)*
+   - `linux/arm64` *(builds `aarch64` / `arm64` only)*
+
+> **Build Duration:** Compiling `core`, V8, `sdkjs`, `web-apps`, and `server` from source takes roughly **2 to 3.5 hours** per architecture on standard GitHub-hosted runners.
+
+#### Scheduled Builds (`schedule`)
+By default, the workflow also runs automatically on the **1st of each month at 02:00 UTC** and publishes both architectures (`linux/amd64` and `linux/arm64`).
+
+### Published Docker Hub Tags
+
+After a successful run, the following tags are available on Docker Hub:
+- `<DOCKERHUB_USERNAME>/onlyoffice-documentserver:latest` *(multi-arch manifest list)*
+- `<DOCKERHUB_USERNAME>/onlyoffice-documentserver:<onlyoffice_version>` *(multi-arch manifest list)*
+- `<DOCKERHUB_USERNAME>/onlyoffice-documentserver:<onlyoffice_version>-amd64` *(if built)*
+- `<DOCKERHUB_USERNAME>/onlyoffice-documentserver:<onlyoffice_version>-arm64` *(if built)*
