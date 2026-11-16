@@ -28,23 +28,12 @@ env:
 jobs:
   build:
     name: Build OnlyOffice (${{ github.event.inputs.onlyoffice_version || 'v10.0.0.169' }}) [${{ matrix.arch }}]
-    if: contains(inputs.platforms || 'linux/amd64,linux/arm64', matrix.docker_platform)
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - arch: amd64
-            docker_platform: linux/amd64
-            oo_platform: linux_64
-            qt_sysroot_target: amd64
-            strip_bin: strip
-          - arch: arm64
-            docker_platform: linux/arm64
-            oo_platform: linux_arm64
-            qt_sysroot_target: all
-            strip_bin: aarch64-linux-gnu-strip
+        arch: ${{ (github.event.inputs.platforms == 'linux/amd64' && fromJSON('["amd64"]')) || (github.event.inputs.platforms == 'linux/arm64' && fromJSON('["arm64"]')) || fromJSON('["amd64", "arm64"]') }}
 
     steps:
       - name: Checkout Repository
@@ -118,7 +107,7 @@ jobs:
 
       - name: Fetch Sub-Repositories (core, server, sdkjs, web-apps) & Hook Patch + Disk-Cleanup Scripts
         env:
-          QT_SYSROOT_TARGET: ${{ matrix.qt_sysroot_target }}
+          QT_SYSROOT_TARGET: ${{ matrix.arch == 'arm64' && 'all' || 'amd64' }}
         run: |
           chmod +x "${GITHUB_WORKSPACE}/scripts/patch-limits.sh"
           
@@ -307,7 +296,7 @@ jobs:
 
       - name: Compile Server Components (./automate.py server)
         env:
-          OO_PLATFORM: ${{ matrix.oo_platform }}
+          OO_PLATFORM: ${{ matrix.arch == 'arm64' && 'linux_arm64' || 'linux_64' }}
         run: |
           cd build_tools/tools/linux
           # Derive PRODUCT_VERSION (e.g. 10.0.0) and BUILD_NUMBER (e.g. 169) from ONLYOFFICE_VERSION (v10.0.0.169)
@@ -361,8 +350,8 @@ jobs:
 
       - name: Merge Built Artifacts with ONLYOFFICE/Docker-DocumentServer
         env:
-          OO_PLATFORM: ${{ matrix.oo_platform }}
-          STRIP_BIN: ${{ matrix.strip_bin }}
+          OO_PLATFORM: ${{ matrix.arch == 'arm64' && 'linux_arm64' || 'linux_64' }}
+          STRIP_BIN: ${{ matrix.arch == 'arm64' && 'aarch64-linux-gnu-strip' || 'strip' }}
         run: |
           git clone --depth 1 --branch "${ONLYOFFICE_VERSION}" https://github.com/ONLYOFFICE/Docker-DocumentServer.git Docker-DocumentServer || \
           git clone --depth 1 https://github.com/ONLYOFFICE/Docker-DocumentServer.git Docker-DocumentServer
@@ -429,12 +418,12 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and Push Docker Image (${{ matrix.docker_platform }})
+      - name: Build and Push Docker Image (linux/${{ matrix.arch }})
         uses: docker/build-push-action@v6
         with:
           context: ./Docker-DocumentServer
           file: ./Docker-DocumentServer/Dockerfile
-          platforms: ${{ matrix.docker_platform }}
+          platforms: linux/${{ matrix.arch }}
           push: true
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/onlyoffice-documentserver:${{ env.ONLYOFFICE_VERSION }}-${{ matrix.arch }}
@@ -442,7 +431,6 @@ jobs:
   merge-manifest:
     name: Publish Multi-Arch Manifest (${{ github.event.inputs.onlyoffice_version || 'v10.0.0.169' }})
     needs: build
-    if: always() && !cancelled() && needs.build.result == 'success'
     runs-on: ubuntu-24.04
 
     steps:
