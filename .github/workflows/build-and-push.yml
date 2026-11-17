@@ -292,6 +292,22 @@ jobs:
           with open(v8_89_path, "w", encoding="utf-8") as f:
               f.write(v8_content)
           print("Patched build_tools/scripts/core_common/modules/v8_89.py (DEPOT_TOOLS_BOOTSTRAP_PYTHON3=0 on Linux)")
+
+          # Hook 8: Pass --no-bytecode --public-packages "*" --public to pkg in build_tools/scripts/build_server.py
+          # Prevents pkg from failing to generate V8 bytecode when cross-packaging node20-linux-arm64 on an x86_64 runner,
+          # which otherwise strips private .js sources and causes MODULE_NOT_FOUND at startup on aarch64.
+          build_server_path = os.path.join("build_tools", "scripts", "build_server.py")
+          with open(build_server_path, "r", encoding="utf-8") as f:
+              bs_content = f.read()
+          old_pkg = '[".", "-t", pkg_target'
+          new_pkg = '[".", "--no-bytecode", "--public-packages", "*", "--public", "-t", pkg_target'
+          if old_pkg not in bs_content:
+              print("ERROR: Could not locate pkg invocation pattern in build_tools/scripts/build_server.py", file=sys.stderr)
+              sys.exit(1)
+          bs_content = bs_content.replace(old_pkg, new_pkg)
+          with open(build_server_path, "w", encoding="utf-8") as f:
+              f.write(bs_content)
+          print("Patched build_tools/scripts/build_server.py (--no-bytecode --public-packages '*' --public for pkg)")
           EOF
 
       - name: Compile Server Components (./automate.py server)
@@ -389,6 +405,13 @@ jobs:
               '    chmod +x /var/www/$COMPANY_NAME/documentserver/server/FileConverter/bin/x2t \\\n'
               '             /var/www/$COMPANY_NAME/documentserver/server/tools/allfontsgen \\\n'
               '             /var/www/$COMPANY_NAME/documentserver/server/tools/allthemesgen && \\\n'
+              '    for bin in /var/www/$COMPANY_NAME/documentserver/server/DocService/docservice \\\n'
+              '               /var/www/$COMPANY_NAME/documentserver/server/FileConverter/converter; do \\\n'
+              '      out=$(NODE_ENV=production NODE_CONFIG_DIR=/etc/$COMPANY_NAME/documentserver timeout 5s "$bin" 2>&1 || true); \\\n'
+              '      if echo "$out" | grep -q "MODULE_NOT_FOUND"; then \\\n'
+              '        echo "FATAL: $bin failed with MODULE_NOT_FOUND:" >&2; echo "$out" >&2; exit 1; \\\n'
+              '      fi; \\\n'
+              '    done && \\\n'
               '    rm -rf /tmp/$PACKAGE_FILE /var/log/$COMPANY_NAME /var/lib/apt/lists/*'
           )
 
