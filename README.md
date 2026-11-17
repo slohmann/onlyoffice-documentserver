@@ -19,12 +19,12 @@ Automated GitHub Actions pipeline to compile **ONLYOFFICE DocumentServer** from 
 
 ## Quick Start (`docker-compose.yml`)
 
-Create a directory on your host (for example `/opt/onlyoffice`) and add the following `docker-compose.yml` (Docker automatically selects `linux/amd64` or `linux/arm64/v8` from the multi-arch manifest; replace `slohmann` with your own Docker Hub username if you forked and built your own image):
+Create a directory on your host (for example `/opt/onlyoffice`) and add the following `docker-compose.yml` (Docker automatically selects `linux/amd64` or `linux/arm64/v8` from the multi-arch manifest; replace `sl71` with your own Docker Hub username if you forked and built your own image):
 
 ```yaml
 services:
   onlyoffice-documentserver:
-    image: slohmann/onlyoffice-documentserver:latest
+    image: sl71/onlyoffice-documentserver:latest
     container_name: onlyoffice-documentserver
     restart: unless-stopped
     ports:
